@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 
+	"github.com/labstack/echo/v4"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -29,50 +32,95 @@ type Log struct {
 }
 
 type Tenant struct {
-	Id primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	// Id primitive.ObjectID `bson:"_id,omitempty"`
-	// Id int32 `json:"id"`
-	// Reg       string `json:"reg"`
-	Active     bool
-	Name       string `json:"name"`
-	Cpf        string `json:"cpf"`
-	Rg         string `json:"rg"`
-	BirthDate  int64  `json:"birth_date"`
-	PropertyId primitive.ObjectID
+	Id        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Active    bool               `json:"active"`
+	Name      string             `json:"name"`
+	Cpf       string             `json:"cpf"`
+	Rg        string             `json:"rg"`
+	BirthDate int64              `json:"birth_date" bson:"birth_date"`
+	RentId    primitive.ObjectID `json:"rent_id" bson:"rent_id"`
+	// PropertyId primitive.ObjectID `json:"property_id" bson:"property_id"`
 }
 
 type Property struct {
-	Id      primitive.ObjectID
-	Name    string
-	Address string
+	Id      primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Active  bool               `json:"active"`
+	Name    string             `json:"name"`
+	Address string             `json:"address"`
+	RentId  primitive.ObjectID `json:"rent_id" bson:"rent_id"`
+	Tenant  interface{}        `json:"tenant" bson:"tenant"`
+	// TenantId primitive.ObjectID `json:"tenant_id" bson:"tenant_id"`
+}
+
+type Rent struct {
+	Id         primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Active     bool               `json:"active"`
+	TenantId   primitive.ObjectID `json:"tenant_id"`
+	PropertyId primitive.ObjectID `json:"property_id"`
 }
 
 type Config struct {
-	DocumentType string
-	DataBase     string
-	Collection   string
+	documentType string
+	collection   string
+	dataBase     string
 }
 
-// Configuration related to documents typed as Tenant
-var tenantConfig = Config{
-	"Tenant",
-	"srv1140", // Database name
-	"tenants", // Database collection name
+type DocsConfig struct {
+	dataBase string
+	configs  []Config
 }
 
 // Returns database and collection name of each document type
-func getDocConfig(obj interface{}) (Config, error) {
-	var config Config
+func (c *DocsConfig) getDocConfig(doc interface{}) (Config, error) {
 
-	switch obj.(type) {
-	case Tenant, *[]Tenant:
-		config = tenantConfig
-	case int:
-		fmt.Println("int type")
-	default:
-		return Config{}, errors.Errorf("Tipo de documento não definido")
+	getTypeConfig := func(typeName string) (Config, error) {
+		for _, c := range c.configs {
+			if c.documentType == typeName {
+				return c, nil
+			}
+		}
+		return Config{}, errors.New("Tipo de documento não definidoAAAAA")
 	}
-	return config, nil
+
+	config := Config{}
+	var err error = nil
+
+	switch doc.(type) {
+	case Tenant, *Tenant, *[]Tenant:
+		config, err = getTypeConfig("Tenant")
+	case Property, *Property, *[]Property:
+		config, err = getTypeConfig("Property")
+	case Rent, *Rent, *[]Rent:
+		config, err = getTypeConfig("Rent")
+	default:
+		err = errors.New("Tipo de documento não definido")
+	}
+
+	config.dataBase = c.dataBase
+
+	return config, err
+}
+
+func (c *DocsConfig) addConfig(newConfig Config) {
+	c.configs = append(c.configs, newConfig)
+}
+
+var configs DocsConfig = DocsConfig{
+	dataBase: "srv1140",
+	configs: []Config{
+		{
+			documentType: "Tenant",
+			collection:   "tenants",
+		},
+		{
+			documentType: "Property",
+			collection:   "properties",
+		},
+		{
+			documentType: "Rent",
+			collection:   "rents",
+		},
+	},
 }
 
 func isTenantValid(tenant Tenant) (bool, string) {
@@ -83,34 +131,45 @@ func isTenantValid(tenant Tenant) (bool, string) {
 	return true, ""
 }
 
-func saveDocument(obj interface{}) error {
+func saveDocument(ctx context.Context, doc interface{}) (primitive.ObjectID, error) {
 
-	config, err := getDocConfig(obj)
-	if err != nil {
-		logger(err)
-		return err
-	}
-
-	dataBase := db.client.Database(config.DataBase)
-	coll := dataBase.Collection(config.Collection)
-	result, err := coll.InsertOne(context.TODO(), obj)
+	config, err := configs.getDocConfig(doc)
 
 	if err != nil {
 		logger(err)
-		return err
+		return primitive.NilObjectID, err
 	}
-	logger(fmt.Sprintf("Inserted %v document with _id: %v", config.DocumentType, result.InsertedID))
-	return nil
+
+	dataBase := db.client.Database(config.dataBase)
+	coll := dataBase.Collection(config.collection)
+
+	if ctx == nil {
+		ctx = context.TODO()
+	}
+
+	result, err := coll.InsertOne(ctx, doc)
+
+	if err != nil {
+		logger(err)
+		return primitive.NilObjectID, err
+	}
+	logger(fmt.Sprintf("Inserted %v document with _id: %v", config.documentType, result.InsertedID))
+
+	objectId, isObjectId := result.InsertedID.(primitive.ObjectID)
+	if isObjectId {
+		return objectId, nil
+	}
+
+	return primitive.NilObjectID, nil
 }
 
-// Based on the type(obj interface{}), lists all documents of its collection
-func listDocuments(obj interface{}) error {
-
-	if reflect.ValueOf(obj).Kind() != reflect.Ptr {
-		err := fmt.Errorf("a lista de documentos(doc interface{}) deve ser uma referencia")
-		logger(err)
-		return err
-	}
+// Based on the type(doc interface{}), lists all documents of its collection
+func listDocuments(doc interface{}, objectId primitive.ObjectID, filter interface{}) error {
+	// if reflect.ValueOf(doc).Kind() != reflect.Ptr {
+	// 	err := errors.New("a lista de documentos(doc interface{}) deve ser um ponteiro")
+	// 	logger(err)
+	// 	return err
+	// }
 
 	// docReference, isReference := doc.(*[]Tenant)
 	// if !isReference {
@@ -118,53 +177,88 @@ func listDocuments(obj interface{}) error {
 	// }
 	// fmt.Println("doc", doc)
 	// fmt.Println("doc", docReference)
-	config, err := getDocConfig(obj)
+	config, err := configs.getDocConfig(doc)
 	if err != nil {
 		logger(err)
 		return err
 	}
 
-	dataBase := db.client.Database(config.DataBase)
-	coll := dataBase.Collection(config.Collection)
+	dataBase := db.client.Database(config.dataBase)
+	coll := dataBase.Collection(config.collection)
 
 	findOptions := options.Find()
-	// findOptions.SetLimit(2)
-	result, err := coll.Find(context.TODO(), bson.D{{}}, findOptions)
+	// findOptions.SetLimit(limit)
+	// filter := bson.D{{Key: "rent_id", Value: "primitive.NilObjectID"}}
+	if objectId != primitive.NilObjectID {
+		filter := bson.M{"_id": objectId}
+		err := coll.FindOne(context.TODO(), filter).Decode(doc)
+		// fmt.Println("id", objectId, result)
+		// err = result.Err()
+		// result.Decode(doc)
+		// .Decode(&doc)
+		if err != nil {
+			// logger(err)
+			return err
+		}
+		// if err != nil {
+		// 	if err == mongo.ErrNoDocuments {
+		// 		// This error means your query did not match any documents.
+		// 		fmt.Println("no document")
+		// 		return err
+		// 	}
+		// 	// panic(err)
+		// }
+	} else {
+		isPointer := reflect.ValueOf(doc).Kind() == reflect.Ptr
+		isSlice := reflect.ValueOf(doc).Elem().Kind() == reflect.Slice
+		if isPointer && !isSlice {
+			err := fmt.Errorf("doc should point to a slice")
+			logger(err)
+			return err
+		}
 
-	if err != nil {
-		logger(err)
-		return err
+		if filter == nil {
+			filter = bson.D{{}}
+		}
+		fmt.Println("filter ", filter)
+		result, err := coll.Find(context.TODO(), filter, findOptions)
+		if err != nil {
+			return err
+		}
+		// result.Decode(&doc)
+		err = result.All(context.TODO(), doc)
+		if err != nil {
+			return err
+		}
 	}
 
-	if err = result.All(context.TODO(), obj); err != nil {
-		logger(err)
-		return err
-	}
+	// if err != nil {
+	// 	logger(err)
+	// 	return err
+	// }
+
+	// if err = result.All(context.TODO(), doc); err != nil {
+	// 	logger(err)
+	// 	return err
+	// }
 
 	return nil
 }
 
-func updateDocument(objectId primitive.ObjectID, obj interface{}) (int64, error) {
+func updateDocument(objectId primitive.ObjectID, doc interface{}) (int64, error) {
 
-	config, err := getDocConfig(obj)
+	config, err := configs.getDocConfig(doc)
 	if err != nil {
 		logger(err)
 		return 0, err
 	}
 
-	// ttype := reflect.ValueOf(ref).Type()
-	// fmt.Println("doc", ttype)
-	// docReference, isReference := doc.(*[]Tenant)
-	// if !isReference {
-	// 	return fmt.Errorf("not Refff")
-	// }
-
 	filter := bson.M{"_id": objectId}
-	// a := {"$set", ref}
-	update := bson.D{{"$set", obj}}
+	// update := bson.A{"$set", doc}
+	update := bson.D{{"$set", doc}}
 
-	dataBase := db.client.Database(config.DataBase)
-	coll := dataBase.Collection(config.Collection)
+	dataBase := db.client.Database(config.dataBase)
+	coll := dataBase.Collection(config.collection)
 	result, err := coll.UpdateOne(context.TODO(), filter, update)
 
 	if err != nil {
@@ -175,17 +269,17 @@ func updateDocument(objectId primitive.ObjectID, obj interface{}) (int64, error)
 	return result.ModifiedCount, nil
 }
 
-func removeDocument(objectId primitive.ObjectID, obj interface{}) (int64, error) {
+func removeDocument(objectId primitive.ObjectID, doc interface{}) (int64, error) {
 
-	config, err := getDocConfig(obj)
+	config, err := configs.getDocConfig(doc)
 	if err != nil {
 		logger(err)
 		return 0, err
 	}
 
 	filter := bson.M{"_id": objectId}
-	dataBase := db.client.Database(config.DataBase)
-	coll := dataBase.Collection(config.Collection)
+	dataBase := db.client.Database(config.dataBase)
+	coll := dataBase.Collection(config.collection)
 	result, err := coll.DeleteOne(context.TODO(), filter)
 
 	if err != nil {
@@ -193,6 +287,92 @@ func removeDocument(objectId primitive.ObjectID, obj interface{}) (int64, error)
 		return 0, err
 	}
 	return result.DeletedCount, nil
+}
+
+func saveTenant(tenant Tenant) error {
+
+	// Checks if there is property x tenant relationship
+	// isValidId := primitive.IsValidObjectID(tenant.PropertyId.Hex())
+	// if isValidId && !tenant.PropertyId.IsZero() {
+
+	// 	var properties Property = Property{}
+	// 	err := listDocuments(&properties, tenant.PropertyId)
+
+	// 	// If no document is found, the returned error is going to be mongo.ErrNoDocuments
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+	tenant.Active = true
+	_, err := saveDocument(nil, tenant)
+
+	if err != nil {
+		logger(err)
+		return err
+	}
+	return nil
+}
+
+func saveProperty(property Property) error {
+
+	// Checks if there is property x tenant relationship
+	// isValidId := primitive.IsValidObjectID(property.TenantId.Hex())
+	// if isValidId && !property.TenantId.IsZero() {
+
+	// 	var tenant Tenant = Tenant{}
+	// 	err := listDocuments(&tenant, property.TenantId)
+
+	// 	// If no document is found, the returned error is going to be mongo.ErrNoDocuments
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+	property.Active = true
+	_, err := saveDocument(nil, property)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			logger(err)
+			// TODO check err
+			return echo.NewHTTPError(http.StatusUnprocessableEntity, "Inquilino não encontrado!")
+		} else {
+			logger(err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func listProperties() ([]Property, error) {
+	var properties []Property = []Property{}
+	err := listDocuments(&properties, primitive.NilObjectID, nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Fills tenant field if any data is available, otherwise it should be null
+	for i, a := range properties {
+		if !a.RentId.IsZero() {
+			tenant := Tenant{}
+			// Checks if there are any rent (tenant/property relation)
+			err := listDocuments(&tenant, a.RentId, nil)
+			if err != nil {
+				logger(fmt.Sprintf("An error occurred when looking for rent document: %v ", a.RentId.String()))
+				logger(err)
+				break
+			}
+			properties[i].Tenant = &tenant
+		}
+	}
+
+	return properties, nil
+}
+
+func saveRent(rent Rent) error {
+
+	return nil
 }
 
 // func saveLog(op Operation, oldValue string, msg string) {

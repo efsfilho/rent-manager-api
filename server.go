@@ -24,8 +24,10 @@ func (d *DataBase) connect() {
 		logger(err)
 		panic(err)
 	}
+
 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
 	opts := options.Client().ApplyURI(mongodbURI).SetServerAPIOptions(serverAPI)
+
 	var err error
 	d.client, err = mongo.Connect(context.TODO(), opts)
 	if err != nil {
@@ -76,23 +78,13 @@ func main() {
 	e.PUT("/tenants/:id", putTenant)
 	e.DELETE("/tenants/:id", deleteTenant)
 
-	// Data base connection
-	// mongodbURI := os.Getenv("MONGODB_URI")
-	// serverAPI := options.ServerAPI(options.ServerAPIVersion1)
-	// opts := options.Client().ApplyURI(mongodbURI).SetServerAPIOptions(serverAPI)
-	// client, err = mongo.Connect(context.TODO(), opts)
-	// if err != nil {
-	// 	logger(err)
-	// 	panic(err)
-	// }
+	e.POST("/properties", postProperty)
+	e.GET("/properties", getProperty)
+	e.PUT("/properties/:id", putProperty)
+	e.DELETE("/properties/:id", deleteProperty)
 
-	// defer func() {
-	// 	if err = client.Disconnect(context.TODO()); err != nil {
-	// 		logger(err)
-	// 		panic(err)
-	// 	}
-	// }()
-	// defer connect()()
+	e.POST("/rents", postRent)
+
 	db = DataBase{}
 	db.connect()
 
@@ -103,22 +95,3 @@ func main() {
 	port := os.Getenv("PORT")
 	e.Logger.Fatal(e.Start(port))
 }
-
-// func connect() func() {
-// 	mongodbURI := os.Getenv("MONGODB_URI")
-// 	serverAPI := options.ServerAPI(options.ServerAPIVersion1)
-// 	opts := options.Client().ApplyURI(mongodbURI).SetServerAPIOptions(serverAPI)
-// 	var err error
-// 	client, err = mongo.Connect(context.TODO(), opts)
-// 	if err != nil {
-// 		logger(err)
-// 		panic(err)
-// 	}
-
-// 	return func() {
-// 		if err = client.Disconnect(context.TODO()); err != nil {
-// 			logger(err)
-// 			panic(err)
-// 		}
-// 	}
-// }
